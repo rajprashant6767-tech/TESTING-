@@ -1,7 +1,6 @@
 {
   "name": "has-mat-payment-test",
   "version": "1.0.0",
-  "description": "Payment verification testing bot",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -9,6 +8,7 @@
   "dependencies": {
     "express": "^4.21.2",
     "telegraf": "^4.16.3",
-    "googleapis": "^144.0.0"
+    "googleapis": "^144.0.0",
+    "tesseract.js": "^6.0.1"
   }
 }
