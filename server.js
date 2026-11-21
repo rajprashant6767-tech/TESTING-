@@ -22,10 +22,10 @@ const GMAIL_ADMIN_TELEGRAM_ID =
 const FAMPAY_SENDER = "no-reply@famapp.in";
 const REQUIRED_RECEIVER = "Prashant Raj";
 
-// Render Persistent Disk ho to DATA_DIR=/var/data set karein.
-// Free ephemeral filesystem par restart ke baad files bachengi nahi.
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
-const DATA_FILE = path.join(DATA_DIR, "payment-test-data.json");
+const DATA_DIR =
+  process.env.DATA_DIR || path.join(__dirname, "data");
+
+const DATA_FILE = path.join(DATA_DIR, "payment-data.json");
 const TOKEN_FILE = path.join(DATA_DIR, "gmail-tokens.json");
 
 if (!TOKEN || !APP_URL) {
@@ -39,21 +39,35 @@ const bot = new Telegraf(TOKEN);
 const requests = new Map();
 const usedTransactions = new Set();
 const processedEmails = new Set();
-const waitingForEmail = new Set();
 const oauthStates = new Map();
+const waitingForEmail = new Set();
 
 let gmailTokens = null;
 let scanRunning = false;
 
-// ------------------------------
+// ---------------------------------
 // STORAGE
-// ------------------------------
+// ---------------------------------
+
+function saveData() {
+  const data = {
+    requests: [...requests.entries()],
+    usedTransactions: [...usedTransactions],
+    processedEmails: [...processedEmails]
+  };
+
+  const temp = DATA_FILE + ".tmp";
+  fs.writeFileSync(temp, JSON.stringify(data, null, 2));
+  fs.renameSync(temp, DATA_FILE);
+}
 
 function loadData() {
   try {
     if (!fs.existsSync(DATA_FILE)) return;
 
-    const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+    const data = JSON.parse(
+      fs.readFileSync(DATA_FILE, "utf8")
+    );
 
     for (const item of data.requests || []) {
       requests.set(item[0], item[1]);
@@ -71,16 +85,18 @@ function loadData() {
   }
 }
 
-function saveData() {
-  const data = {
-    requests: [...requests.entries()],
-    usedTransactions: [...usedTransactions],
-    processedEmails: [...processedEmails]
-  };
+function saveGmailTokens(tokens) {
+  gmailTokens = tokens;
 
-  const tempFile = DATA_FILE + ".tmp";
-  fs.writeFileSync(tempFile, JSON.stringify(data, null, 2));
-  fs.renameSync(tempFile, DATA_FILE);
+  const temp = TOKEN_FILE + ".tmp";
+
+  fs.writeFileSync(
+    temp,
+    JSON.stringify(tokens),
+    { mode: 0o600 }
+  );
+
+  fs.renameSync(temp, TOKEN_FILE);
 }
 
 function loadGmailTokens() {
@@ -91,28 +107,18 @@ function loadGmailTokens() {
       );
     }
   } catch (error) {
-    console.error("Gmail token load error:", error.message);
+    console.error("Token load error:", error.message);
   }
-}
-
-function saveGmailTokens(tokens) {
-  gmailTokens = tokens;
-
-  const tempFile = TOKEN_FILE + ".tmp";
-  fs.writeFileSync(tempFile, JSON.stringify(tokens), {
-    mode: 0o600
-  });
-  fs.renameSync(tempFile, TOKEN_FILE);
 }
 
 loadData();
 loadGmailTokens();
 
-// ------------------------------
+// ---------------------------------
 // BASIC HELPERS
-// ------------------------------
+// ---------------------------------
 
-function isGmailAdmin(userId) {
+function isAdmin(userId) {
   return Boolean(
     GMAIL_ADMIN_TELEGRAM_ID &&
     String(userId) === String(GMAIL_ADMIN_TELEGRAM_ID)
@@ -151,30 +157,34 @@ function normalizeId(value) {
 }
 
 function normalizeAmount(value) {
-  const number = Number(
+  const n = Number(
     String(value || "").replace(/[₹,\s]/g, "")
   );
 
-  return Number.isFinite(number) ? number : null;
+  return Number.isFinite(n) ? n : null;
 }
 
 function transactionKeys(payment) {
-  const keys = [];
+  const result = [];
 
   if (payment.transactionId) {
-    keys.push("TXN:" + normalizeId(payment.transactionId));
+    result.push(
+      "TXN:" + normalizeId(payment.transactionId)
+    );
   }
 
   if (payment.utr) {
-    keys.push("UTR:" + normalizeId(payment.utr));
+    result.push(
+      "UTR:" + normalizeId(payment.utr)
+    );
   }
 
-  return [...new Set(keys)];
+  return [...new Set(result)];
 }
 
-// ------------------------------
-// DATE / TIME PARSER
-// ------------------------------
+// ---------------------------------
+// DATE AND TIME
+// ---------------------------------
 
 function parseDateTime(value) {
   if (!value) return null;
@@ -197,9 +207,18 @@ function parseDateTime(value) {
   const year = Number(match[6]);
 
   const months = {
-    january: 0, february: 1, march: 2, april: 3,
-    may: 4, june: 5, july: 6, august: 7,
-    september: 8, october: 9, november: 10, december: 11
+    january: 0,
+    february: 1,
+    march: 2,
+    april: 3,
+    may: 4,
+    june: 5,
+    july: 6,
+    august: 7,
+    september: 8,
+    october: 9,
+    november: 10,
+    december: 11
   };
 
   const month = months[monthName];
@@ -217,16 +236,15 @@ function parseDateTime(value) {
   if (ampm === "AM" && hour === 12) hour = 0;
 
   return {
-    date: `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
-    time: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`
+    date:
+      `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
+    time:
+      `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`
   };
 }
 
-// Screenshot OCR may show "November 20 at 3:14 PM".
 function parseScreenshotDateTime(text) {
-  const value = String(text || "").replace(/\s+/g, " ");
-
-  const match = value.match(
+  const match = String(text || "").match(
     /([A-Za-z]+)\s+(\d{1,2})(?:,)?\s+(?:at\s+)?(\d{1,2}):(\d{2})\s*(AM|PM)(?:\s+IST)?(?:,?\s+(\d{4}))?/i
   );
 
@@ -239,21 +257,37 @@ function parseScreenshotDateTime(text) {
   );
 }
 
-// ------------------------------
-// FAMPAY EMAIL PARSER
-// ------------------------------
+// ---------------------------------
+// EMAIL PARSER
+// ---------------------------------
+
+function decodeEntities(text) {
+  return String(text || "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, " ")
+    .replace(/&#(\d+);/g, (_, n) =>
+      String.fromCharCode(Number(n))
+    );
+}
 
 function parseFamPayEmail(emailText) {
-  const text = String(emailText || "")
-    .replace(/\s+/g, " ");
+  const text = decodeEntities(
+    String(emailText || "")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+  ).replace(/\s+/g, " ").trim();
 
-  // Only incoming-payment wording is accepted.
   if (!/you have successfully received/i.test(text)) {
     return null;
   }
 
   const receiverMatch = text.match(
-    /Hey\s+([A-Za-z][A-Za-z .'-]{1,70}?)[,\s]+You have successfully received/i
+    /Hey\s+(.{2,70}?),\s*You have successfully received/i
   );
 
   const amountMatch = text.match(
@@ -265,7 +299,7 @@ function parseFamPayEmail(emailText) {
   );
 
   const utrMatch = text.match(
-    /\bUTR\s*:\s*(\d{6,})/i
+    /\bUTR(?:\s*ID)?\s*:\s*(\d{6,})/i
   );
 
   const dateMatch = text.match(
@@ -276,10 +310,10 @@ function parseFamPayEmail(emailText) {
     return null;
   }
 
-  const amount = normalizeAmount(amountMatch[1]);
   const dateTime = parseDateTime(dateMatch[1]);
+  const amount = normalizeAmount(amountMatch[1]);
 
-  if (amount === null || !dateTime) return null;
+  if (!dateTime || amount === null) return null;
 
   const payment = {
     receiver: receiverMatch[1].trim(),
@@ -299,9 +333,9 @@ function parseFamPayEmail(emailText) {
   return payment;
 }
 
-// ------------------------------
-// EMAIL BODY EXTRACTION
-// ------------------------------
+// ---------------------------------
+// EMAIL BODY
+// ---------------------------------
 
 function decodeBase64Url(value) {
   if (!value) return "";
@@ -313,35 +347,30 @@ function decodeBase64Url(value) {
 }
 
 function stripHtml(html) {
-  return html
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/\s+/g, " ");
+  return decodeEntities(
+    String(html || "")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+  ).replace(/\s+/g, " ");
 }
 
 function extractEmailBody(payload) {
-  let plainText = "";
-  let htmlText = "";
+  let plain = "";
+  let html = "";
 
   function walk(part) {
     if (!part) return;
 
-    if (part.body && part.body.data) {
+    if (part.body?.data) {
       const decoded = decodeBase64Url(part.body.data);
 
       if (part.mimeType === "text/plain") {
-        plainText += decoded + "\n";
+        plain += decoded + "\n";
       }
 
       if (part.mimeType === "text/html") {
-        htmlText += decoded + "\n";
+        html += decoded + "\n";
       }
     }
 
@@ -352,27 +381,29 @@ function extractEmailBody(payload) {
 
   walk(payload);
 
-  return plainText.trim()
-    ? plainText
-    : stripHtml(htmlText);
+  return plain.trim() ? plain : stripHtml(html);
 }
 
-// ------------------------------
+// ---------------------------------
 // SCREENSHOT OCR
-// ------------------------------
+// ---------------------------------
 
 async function readScreenshot(fileId) {
-  const fileLink = await bot.telegram.getFileLink(fileId);
-
-  const response = await fetch(fileLink.href);
+  const url = await bot.telegram.getFileLink(fileId);
+  const response = await fetch(url.href);
 
   if (!response.ok) {
-    throw new Error("Telegram screenshot download failed");
+    throw new Error("Screenshot download failed");
   }
 
-  const buffer = Buffer.from(await response.arrayBuffer());
+  const buffer = Buffer.from(
+    await response.arrayBuffer()
+  );
 
-  const result = await Tesseract.recognize(buffer, "eng");
+  const result = await Tesseract.recognize(
+    buffer,
+    "eng"
+  );
 
   return result.data.text || "";
 }
@@ -384,10 +415,6 @@ function parseScreenshot(text) {
     /₹\s*([\d,]+(?:\.\d{1,2})?)/i
   );
 
-  const receiverMatch = value.match(
-    /(?:Hey\s+)?([A-Za-z][A-Za-z .'-]{1,60})\s*(?:\n|$)/i
-  );
-
   const transactionMatch = value.match(
     /(?:Transaction\s*ID|Ref(?:erence)?\s*ID)\s*:?\s*([A-Z0-9-]+)/i
   );
@@ -397,6 +424,11 @@ function parseScreenshot(text) {
   );
 
   const dateTime = parseScreenshotDateTime(value);
+
+  // Avoid guessing a receiver from arbitrary first OCR line.
+  const receiverMatch = value.match(
+    /(?:receiver|received by|to)\s*:?\s*([A-Za-z][A-Za-z .'-]{1,60})/i
+  );
 
   return {
     amount: amountMatch
@@ -410,69 +442,58 @@ function parseScreenshot(text) {
       : null,
     utr: utrMatch ? utrMatch[1].trim() : null,
     date: dateTime?.date || null,
-    time: dateTime?.time || null,
-    rawText: value
+    time: dateTime?.time || null
   };
 }
 
-// ------------------------------
-// FIELD COMPARISON
-// ------------------------------
+// ---------------------------------
+// MATCHING
+// ---------------------------------
 
 function comparePayment(request, email, screenshot) {
   const checks = [];
 
-  function add(label, passed, reason) {
-    checks.push({
-      label,
-      passed: Boolean(passed),
-      reason
-    });
-  }
+  checks.push({
+    field: "Receiver",
+    ok:
+      normalizeName(email.receiver) ===
+        normalizeName(REQUIRED_RECEIVER) &&
+      normalizeName(screenshot.receiver) ===
+        normalizeName(REQUIRED_RECEIVER)
+  });
 
-  add(
-    "Receiver name",
-    normalizeName(email.receiver) === normalizeName(REQUIRED_RECEIVER) &&
-    normalizeName(screenshot.receiver) === normalizeName(REQUIRED_RECEIVER),
-    "Receiver must be " + REQUIRED_RECEIVER
-  );
+  checks.push({
+    field: "Amount",
+    ok:
+      email.amount === request.amount &&
+      screenshot.amount === request.amount &&
+      email.amount === screenshot.amount
+  });
 
-  add(
-    "Amount",
-    email.amount === request.amount &&
-    screenshot.amount === request.amount &&
-    email.amount === screenshot.amount,
-    "Request, email and screenshot amounts must be equal"
-  );
+  checks.push({
+    field: "Date",
+    ok:
+      Boolean(email.date && screenshot.date) &&
+      email.date === screenshot.date
+  });
 
-  add(
-    "Date",
-    Boolean(email.date && screenshot.date) &&
-    email.date === screenshot.date,
-    "Email and screenshot dates must match"
-  );
+  checks.push({
+    field: "Time",
+    ok:
+      Boolean(email.time && screenshot.time) &&
+      email.time === screenshot.time
+  });
 
-  add(
-    "Time",
-    Boolean(email.time && screenshot.time) &&
-    email.time === screenshot.time,
-    "Email and screenshot times must match"
-  );
+  const emailKeys = transactionKeys(email);
+  const screenshotKeys = transactionKeys(screenshot);
 
-  const emailIds = transactionKeys(email);
-  const screenshotIds = transactionKeys(screenshot);
-
-  const identifierMatch = emailIds.some(key =>
-    screenshotIds.includes(key)
-  );
-
-  add(
-    "Transaction ID / UTR",
-    emailIds.length > 0 &&
-    screenshotIds.length > 0 &&
-    identifierMatch,
-    "At least one email identifier must match screenshot"
-  );
+  checks.push({
+    field: "Transaction ID / UTR",
+    ok:
+      emailKeys.length > 0 &&
+      screenshotKeys.length > 0 &&
+      emailKeys.some(key => screenshotKeys.includes(key))
+  });
 
   return checks;
 }
@@ -485,26 +506,32 @@ function getPendingRequests() {
     .reverse();
 }
 
-// ------------------------------
-// HEALTH ROUTES
-// ------------------------------
+// ---------------------------------
+// HEALTH
+// ---------------------------------
 
 app.get("/", (req, res) => {
   res.send("HAS MAT Payment Testing Bot is running");
 });
 
 app.get("/health", (req, res) => {
-  res.json({ ok: true });
+  res.json({
+    ok: true,
+    gmailConnected: Boolean(gmailTokens),
+    persistentDirectory: DATA_DIR
+  });
 });
 
-// ------------------------------
+// ---------------------------------
 // GMAIL OAUTH CALLBACK
-// ------------------------------
+// ---------------------------------
 
 app.get("/gmail/oauth2callback", async (req, res) => {
   try {
     if (!gmailConfigured()) {
-      return res.status(500).send("Google OAuth variables missing.");
+      return res.status(500).send(
+        "Google OAuth variables missing."
+      );
     }
 
     const { code, state, error } = req.query;
@@ -515,7 +542,11 @@ app.get("/gmail/oauth2callback", async (req, res) => {
       );
     }
 
-    if (!code || !state || !oauthStates.has(String(state))) {
+    if (
+      !code ||
+      !state ||
+      !oauthStates.has(String(state))
+    ) {
       return res.status(400).send(
         "Invalid or expired OAuth state. Run /connectgmail again."
       );
@@ -523,85 +554,67 @@ app.get("/gmail/oauth2callback", async (req, res) => {
 
     oauthStates.delete(String(state));
 
-    const oauth2Client = createOAuthClient();
-    const result = await oauth2Client.getToken(String(code));
+    const client = createOAuthClient();
+    const result = await client.getToken(String(code));
 
     if (!result.tokens.refresh_token) {
       return res.status(400).send(
-        "Refresh token not received. Revoke this app's access in Google Account permissions and connect again."
+        "Refresh token not received. Reconnect Gmail and review Google's permission screen."
       );
     }
 
     saveGmailTokens(result.tokens);
 
-    res.send(`
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>Gmail Connected</title>
-      </head>
-      <body>
-        <h2>Gmail connection successful</h2>
-        <p>HAS MAT test bot is connected.</p>
-        <p>Return to Telegram and use /checkemail.</p>
-        <p>Payment approval and wallet credit remain disabled.</p>
-      </body>
-      </html>
-    `);
+    res.send(
+      "<h2>Gmail connection successful</h2>" +
+      "<p>Return to Telegram and use /checkemail.</p>" +
+      "<p>Payment approval and wallet credit are disabled.</p>"
+    );
   } catch (error) {
-    console.error("Gmail OAuth error:", error.message);
-    res.status(500).send("Gmail connection failed. Check Render logs.");
+    console.error("OAuth error:", error.message);
+    res.status(500).send("Gmail connection failed.");
   }
 });
 
-// ------------------------------
-// START COMMAND
-// ------------------------------
+// ---------------------------------
+// START
+// ---------------------------------
 
-bot.start(async (ctx) => {
-  waitingForEmail.delete(ctx.from.id);
-
+bot.start(async ctx => {
   await ctx.reply(
-    "Welcome to HAS MAT Payment Testing Bot!\n\n" +
+    "HAS MAT Payment Testing Bot\n\n" +
     "Testing only. No payment approval or wallet credit.\n\n" +
-    "Amount enter karein (whole rupees only).\n\n" +
-    "Example: 5\n\n" +
-    "Commands:\n" +
+    "Amount enter karein. Example: 5\n\n" +
     "/myid - Telegram ID\n" +
-    "/connectgmail - Gmail connect (admin)\n" +
-    "/checkemail - FamApp email scan (admin)\n" +
-    "/testemail - Manual email parser test (admin)"
+    "/connectgmail - Admin Gmail connection\n" +
+    "/checkemail - Admin FamApp scan\n" +
+    "/testemail - Admin email parser test"
   );
 });
 
-// ------------------------------
-// TELEGRAM ID
-// ------------------------------
-
-bot.command("myid", async (ctx) => {
+bot.command("myid", async ctx => {
   await ctx.reply(`Your Telegram ID: ${ctx.from.id}`);
 });
 
-// ------------------------------
+// ---------------------------------
 // CONNECT GMAIL
-// ------------------------------
+// ---------------------------------
 
-bot.command("connectgmail", async (ctx) => {
-  if (!isGmailAdmin(ctx.from.id)) {
-    return ctx.reply("Gmail admin access nahi hai.");
+bot.command("connectgmail", async ctx => {
+  if (!isAdmin(ctx.from.id)) {
+    return ctx.reply("Admin access nahi hai.");
   }
 
   if (!gmailConfigured()) {
-    return ctx.reply("Google OAuth environment variables missing hain.");
+    return ctx.reply("Google OAuth variables missing hain.");
   }
 
   const state = crypto.randomBytes(24).toString("hex");
   oauthStates.set(state, ctx.from.id);
 
-  const oauth2Client = createOAuthClient();
+  const client = createOAuthClient();
 
-  const authUrl = oauth2Client.generateAuthUrl({
+  const authUrl = client.generateAuthUrl({
     access_type: "offline",
     prompt: "consent",
     scope: [
@@ -611,49 +624,45 @@ bot.command("connectgmail", async (ctx) => {
   });
 
   await ctx.reply(
-    "Gmail connect karne ke liye link kholo:\n\n" +
-    authUrl +
-    "\n\nGoogle permission screen ko review karein."
+    "Gmail connect link:\n\n" + authUrl
   );
 });
 
-// ------------------------------
+// ---------------------------------
 // CHECK EMAIL
-// ------------------------------
+// ---------------------------------
 
-bot.command("checkemail", async (ctx) => {
-  if (!isGmailAdmin(ctx.from.id)) {
-    return ctx.reply("Gmail admin access nahi hai.");
+bot.command("checkemail", async ctx => {
+  if (!isAdmin(ctx.from.id)) {
+    return ctx.reply("Admin access nahi hai.");
   }
 
   if (scanRunning) {
-    return ctx.reply("Email scan already running. Thoda wait karein.");
+    return ctx.reply("Scan already running. Wait karein.");
   }
 
   if (!gmailTokens) {
     return ctx.reply(
-      "Gmail connection available nahi hai.\n" +
-      "Pehle /connectgmail karein."
+      "Gmail connected nahi hai. /connectgmail karein."
     );
   }
 
   scanRunning = true;
 
   try {
-    const oauth2Client = createOAuthClient();
-    oauth2Client.setCredentials(gmailTokens);
+    const client = createOAuthClient();
+    client.setCredentials(gmailTokens);
 
-    oauth2Client.on("tokens", (tokens) => {
-      const updated = {
+    client.on("tokens", tokens => {
+      saveGmailTokens({
         ...gmailTokens,
         ...tokens
-      };
-      saveGmailTokens(updated);
+      });
     });
 
     const gmail = google.gmail({
       version: "v1",
-      auth: oauth2Client
+      auth: client
     });
 
     const response = await gmail.users.messages.list({
@@ -664,21 +673,16 @@ bot.command("checkemail", async (ctx) => {
 
     const messages = response.data.messages || [];
 
-    if (!messages.length) {
-      return ctx.reply(
-        "FamApp incoming emails found: 0\nEmail scan complete."
-      );
-    }
-
-    let matchedCount = 0;
-    let duplicateCount = 0;
-    let ignoredCount = 0;
-    let unreadableCount = 0;
-    let mismatchCount = 0;
+    let matched = 0;
+    let duplicates = 0;
+    let unrelated = 0;
+    let unreadable = 0;
+    let mismatches = 0;
+    let noPending = 0;
 
     for (const message of messages) {
       if (processedEmails.has(message.id)) {
-        ignoredCount++;
+        unrelated++;
         continue;
       }
 
@@ -690,25 +694,26 @@ bot.command("checkemail", async (ctx) => {
 
       const headers = full.data.payload?.headers || [];
 
-      const fromHeader = headers.find(
+      const from = headers.find(
         h => h.name.toLowerCase() === "from"
       );
 
       if (
-        !fromHeader ||
-        !fromHeader.value.toLowerCase().includes(FAMPAY_SENDER)
+        !from ||
+        !from.value.toLowerCase().includes(FAMPAY_SENDER)
       ) {
-        ignoredCount++;
+        unrelated++;
         processedEmails.add(message.id);
+        saveData();
         continue;
       }
 
-      const emailText = extractEmailBody(full.data.payload);
-      const payment = parseFamPayEmail(emailText);
+      const text = extractEmailBody(full.data.payload);
+      const payment = parseFamPayEmail(text);
 
       if (!payment) {
-        ignoredCount++;
-        processedEmails.add(message.id);
+        unreadable++;
+        // Keep email eligible for retry after parser improvements.
         continue;
       }
 
@@ -718,29 +723,30 @@ bot.command("checkemail", async (ctx) => {
         keys.length &&
         keys.some(key => usedTransactions.has(key))
       ) {
-        duplicateCount++;
+        duplicates++;
         processedEmails.add(message.id);
+        saveData();
         continue;
       }
 
       const candidates = getPendingRequests();
 
       if (!candidates.length) {
-        ignoredCount++;
-        processedEmails.add(message.id);
+        noPending++;
+        // Do not mark processed: a later request may be checked.
         continue;
       }
 
-      let foundCandidate = null;
-      let foundChecks = null;
+      let matchedRequest = null;
+      let lastChecks = null;
 
       for (const [requestId, request] of candidates) {
         if (!request.screenshotFileId) continue;
 
-        let screenshotText;
+        let ocrText;
 
         try {
-          screenshotText = await readScreenshot(
+          ocrText = await readScreenshot(
             request.screenshotFileId
           );
         } catch (error) {
@@ -748,39 +754,40 @@ bot.command("checkemail", async (ctx) => {
           continue;
         }
 
-        const screenshot = parseScreenshot(screenshotText);
+        const screenshot = parseScreenshot(ocrText);
         const checks = comparePayment(
           request,
           payment,
           screenshot
         );
 
-        if (checks.every(check => check.passed)) {
-          foundCandidate = {
+        if (checks.every(check => check.ok)) {
+          matchedRequest = {
             requestId,
             request,
             screenshot
           };
-          foundChecks = checks;
+          lastChecks = checks;
           break;
         }
+
+        lastChecks = checks;
       }
 
-      if (!foundCandidate) {
-        // Do not spam users with every unrelated FamApp email.
-        ignoredCount++;
-        processedEmails.add(message.id);
+      if (!matchedRequest) {
+        // Do not mark as processed; allow retry.
+        mismatches++;
         continue;
       }
 
-      // Reserve both identifiers before changing request status.
-      // This protects against reuse within this running process.
+      // Re-check all keys immediately before reserving.
       if (
         keys.length === 0 ||
         keys.some(key => usedTransactions.has(key))
       ) {
-        duplicateCount++;
+        duplicates++;
         processedEmails.add(message.id);
+        saveData();
         continue;
       }
 
@@ -788,7 +795,7 @@ bot.command("checkemail", async (ctx) => {
         usedTransactions.add(key);
       }
 
-      const { requestId, request } = foundCandidate;
+      const { requestId, request } = matchedRequest;
 
       request.status = "EMAIL_SCREENSHOT_MATCHED";
       request.matchedAt = new Date().toISOString();
@@ -798,14 +805,14 @@ bot.command("checkemail", async (ctx) => {
       processedEmails.add(message.id);
       saveData();
 
-      matchedCount++;
+      matched++;
 
       await ctx.telegram.sendMessage(
         request.userId,
         "Testing details matched!\n\n" +
         `Request ID: ${requestId}\n` +
-        `Amount: ₹${payment.amount}\n` +
         `Receiver: ${payment.receiver}\n` +
+        `Amount: ₹${payment.amount}\n` +
         `Date: ${payment.date}\n` +
         `Time: ${payment.time} IST\n` +
         `Transaction ID: ${payment.transactionId || "Not found"}\n` +
@@ -822,54 +829,54 @@ bot.command("checkemail", async (ctx) => {
     await ctx.reply(
       "Email Scan Complete!\n\n" +
       `FamApp emails found: ${messages.length}\n` +
-      `Matched: ${matchedCount}\n` +
-      `Duplicates skipped: ${duplicateCount}\n` +
-      `Unrelated/old emails ignored: ${ignoredCount}\n` +
-      `Unreadable emails: ${unreadableCount}\n` +
-      `Mismatches: ${mismatchCount}\n\n` +
+      `Matched: ${matched}\n` +
+      `Duplicates skipped: ${duplicates}\n` +
+      `Unrelated/previously processed: ${unrelated}\n` +
+      `Unreadable emails: ${unreadable}\n` +
+      `Mismatches: ${mismatches}\n` +
+      `No pending request: ${noPending}\n\n` +
       "Payment approval: Disabled\n" +
       "Wallet credit: Disabled"
     );
   } catch (error) {
-    console.error("Gmail check error:", error.message);
+    console.error("Gmail scan error:", error.message);
 
     await ctx.reply(
-      "Gmail check failed.\nRender logs check karein."
+      "Gmail scan failed. Render logs check karein."
     );
   } finally {
     scanRunning = false;
   }
 });
 
-// ------------------------------
-// MANUAL EMAIL TEST
-// ------------------------------
+// ---------------------------------
+// MANUAL EMAIL PARSER TEST
+// ---------------------------------
 
-bot.command("testemail", async (ctx) => {
-  if (!isGmailAdmin(ctx.from.id)) {
+bot.command("testemail", async ctx => {
+  if (!isAdmin(ctx.from.id)) {
     return ctx.reply("Admin access nahi hai.");
   }
 
   waitingForEmail.add(ctx.from.id);
 
   await ctx.reply(
-    "Redacted FamApp sample email text paste karein.\n" +
-    "Personal details hide karke test data use karein."
+    "Redacted FamApp email ka complete text paste karein."
   );
 });
 
-// ------------------------------
+// ---------------------------------
 // TEXT HANDLER
-// ------------------------------
+// ---------------------------------
 
-bot.on("text", async (ctx) => {
+bot.on("text", async ctx => {
   const userId = ctx.from.id;
   const text = ctx.message.text.trim();
 
   if (text.startsWith("/")) return;
 
   if (waitingForEmail.has(userId)) {
-    if (!isGmailAdmin(userId)) {
+    if (!isAdmin(userId)) {
       waitingForEmail.delete(userId);
       return ctx.reply("Admin access nahi hai.");
     }
@@ -880,20 +887,20 @@ bot.on("text", async (ctx) => {
 
     if (!payment) {
       return ctx.reply(
-        "FamApp email format incomplete ya unreadable hai.\n" +
+        "Email parser could not read required fields.\n" +
         "Required: receiver, amount, date, time and ID/UTR."
       );
     }
 
     return ctx.reply(
-      "Email parser result:\n\n" +
+      "Email Parser Result\n\n" +
       `Receiver: ${payment.receiver}\n` +
       `Amount: ₹${payment.amount}\n` +
       `Date: ${payment.date}\n` +
       `Time: ${payment.time} IST\n` +
       `Transaction ID: ${payment.transactionId || "Not found"}\n` +
       `UTR: ${payment.utr || "Not found"}\n\n` +
-      "This is parser testing only. No payment approval."
+      "Parser test only. No payment approval."
     );
   }
 
@@ -906,7 +913,7 @@ bot.on("text", async (ctx) => {
     amount > 100000
   ) {
     return ctx.reply(
-      "Valid whole amount enter karein.\nExample: 5"
+      "Valid whole amount enter karein. Example: 5"
     );
   }
 
@@ -928,16 +935,16 @@ bot.on("text", async (ctx) => {
     "Test Request Created\n\n" +
     `Request ID: ${requestId}\n` +
     `Amount: ₹${amount}\n\n` +
-    "Ab FamApp payment notification ka screenshot bhejein.\n" +
-    "Real payment approval aur wallet credit disabled hain."
+    "FamApp notification screenshot bhejein.\n" +
+    "Approval and wallet credit disabled."
   );
 });
 
-// ------------------------------
-// SCREENSHOT HANDLER
-// ------------------------------
+// ---------------------------------
+// PHOTO HANDLER
+// ---------------------------------
 
-bot.on("photo", async (ctx) => {
+bot.on("photo", async ctx => {
   const userId = ctx.from.id;
 
   const pending = [...requests.entries()]
@@ -946,7 +953,7 @@ bot.on("photo", async (ctx) => {
       item.userId === userId &&
       (
         item.status === "AWAITING_SCREENSHOT" ||
-        item.status === "SCREENSHOT_NEEDS_REUPLOAD"
+        item.status === "SCREENSHOT_RECEIVED"
       )
     );
 
@@ -971,20 +978,19 @@ bot.on("photo", async (ctx) => {
     "Screenshot received.\n\n" +
     `Request ID: ${requestId}\n` +
     `Amount: ₹${request.amount}\n` +
-    "Status: Pending email and screenshot matching.\n\n" +
-    "Admin email scan ke liye /checkemail use kare."
+    "Admin can now use /checkemail."
   );
 });
 
-// ------------------------------
-// TELEGRAM WEBHOOK
-// ------------------------------
+// ---------------------------------
+// WEBHOOK
+// ---------------------------------
 
 app.use(bot.webhookCallback("/telegram"));
 
-// ------------------------------
-// START SERVER
-// ------------------------------
+// ---------------------------------
+// SERVER START
+// ---------------------------------
 
 async function start() {
   const port = process.env.PORT || 10000;
