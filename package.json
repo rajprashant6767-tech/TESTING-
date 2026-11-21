@@ -1,6 +1,8 @@
+
 {
   "name": "has-mat-payment-test",
   "version": "1.0.0",
+  "description": "FamApp payment notification testing bot",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
