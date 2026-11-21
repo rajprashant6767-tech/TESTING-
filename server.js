@@ -57,6 +57,7 @@ function saveData() {
   };
 
   const temp = DATA_FILE + ".tmp";
+
   fs.writeFileSync(temp, JSON.stringify(data, null, 2));
   fs.renameSync(temp, DATA_FILE);
 }
@@ -157,9 +158,10 @@ function normalizeId(value) {
 }
 
 function normalizeAmount(value) {
-  const n = Number(
-    String(value || "").replace(/[₹,\s]/g, "")
-  );
+  const cleaned = String(value || "")
+    .replace(/[₹,\s]/g, "");
+
+  const n = Number(cleaned);
 
   return Number.isFinite(n) ? n : null;
 }
@@ -190,6 +192,7 @@ function parseDateTime(value) {
   if (!value) return null;
 
   const text = String(value)
+    .replace(/\u00a0/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 
@@ -235,6 +238,16 @@ function parseDateTime(value) {
   if (ampm === "PM" && hour !== 12) hour += 12;
   if (ampm === "AM" && hour === 12) hour = 0;
 
+  const checkDate = new Date(Date.UTC(year, month, day));
+
+  if (
+    checkDate.getUTCFullYear() !== year ||
+    checkDate.getUTCMonth() !== month ||
+    checkDate.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
   return {
     date:
       `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`,
@@ -258,7 +271,7 @@ function parseScreenshotDateTime(text) {
 }
 
 // ---------------------------------
-// EMAIL PARSER
+// EMAIL TEXT HELPERS
 // ---------------------------------
 
 function decodeEntities(text) {
@@ -268,19 +281,87 @@ function decodeEntities(text) {
     .replace(/&quot;/gi, '"')
     .replace(/&#39;/gi, "'")
     .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, " ")
+    .replace(/&gt;/gi, ">")
     .replace(/&#(\d+);/g, (_, n) =>
       String.fromCharCode(Number(n))
+    )
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) =>
+      String.fromCodePoint(parseInt(n, 16))
     );
 }
 
-function parseFamPayEmail(emailText) {
-  const text = decodeEntities(
-    String(emailText || "")
+function stripHtml(html) {
+  return decodeEntities(
+    String(html || "")
       .replace(/<style[\s\S]*?<\/style>/gi, " ")
       .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<\/(div|p|tr|td|th|li|h[1-6])>/gi, "\n")
+      .replace(/<br\s*\/?>/gi, "\n")
       .replace(/<[^>]+>/g, " ")
-  ).replace(/\s+/g, " ").trim();
+  );
+}
+
+function decodeBase64Url(value) {
+  if (!value) return "";
+
+  let normalized = String(value)
+    .replace(/-/g, "+")
+    .replace(/_/g, "/");
+
+  while (normalized.length % 4) {
+    normalized += "=";
+  }
+
+  return Buffer.from(normalized, "base64").toString("utf8");
+}
+
+function extractEmailBody(payload) {
+  const plainParts = [];
+  const htmlParts = [];
+
+  function walk(part) {
+    if (!part) return;
+
+    const mime = String(part.mimeType || "").toLowerCase();
+
+    if (part.body?.data) {
+      const decoded = decodeBase64Url(part.body.data);
+
+      if (mime === "text/plain") {
+        plainParts.push(decoded);
+      } else if (mime === "text/html") {
+        htmlParts.push(decoded);
+      }
+    }
+
+    for (const child of part.parts || []) {
+      walk(child);
+    }
+  }
+
+  walk(payload);
+
+  if (plainParts.length) {
+    return plainParts.join("\n");
+  }
+
+  if (htmlParts.length) {
+    return htmlParts.map(stripHtml).join("\n");
+  }
+
+  return "";
+}
+
+// ---------------------------------
+// EMAIL PARSER
+// ---------------------------------
+
+function parseFamPayEmail(emailText) {
+  const text = stripHtml(emailText)
+    .replace(/\u00a0/g, " ")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
   if (!/you have successfully received/i.test(text)) {
     return null;
@@ -334,57 +415,6 @@ function parseFamPayEmail(emailText) {
 }
 
 // ---------------------------------
-// EMAIL BODY
-// ---------------------------------
-
-function decodeBase64Url(value) {
-  if (!value) return "";
-
-  return Buffer.from(
-    value.replace(/-/g, "+").replace(/_/g, "/"),
-    "base64"
-  ).toString("utf8");
-}
-
-function stripHtml(html) {
-  return decodeEntities(
-    String(html || "")
-      .replace(/<style[\s\S]*?<\/style>/gi, " ")
-      .replace(/<script[\s\S]*?<\/script>/gi, " ")
-      .replace(/<[^>]+>/g, " ")
-  ).replace(/\s+/g, " ");
-}
-
-function extractEmailBody(payload) {
-  let plain = "";
-  let html = "";
-
-  function walk(part) {
-    if (!part) return;
-
-    if (part.body?.data) {
-      const decoded = decodeBase64Url(part.body.data);
-
-      if (part.mimeType === "text/plain") {
-        plain += decoded + "\n";
-      }
-
-      if (part.mimeType === "text/html") {
-        html += decoded + "\n";
-      }
-    }
-
-    for (const child of part.parts || []) {
-      walk(child);
-    }
-  }
-
-  walk(payload);
-
-  return plain.trim() ? plain : stripHtml(html);
-}
-
-// ---------------------------------
 // SCREENSHOT OCR
 // ---------------------------------
 
@@ -425,7 +455,6 @@ function parseScreenshot(text) {
 
   const dateTime = parseScreenshotDateTime(value);
 
-  // Avoid guessing a receiver from arbitrary first OCR line.
   const receiverMatch = value.match(
     /(?:receiver|received by|to)\s*:?\s*([A-Za-z][A-Za-z .'-]{1,60})/i
   );
@@ -695,13 +724,12 @@ bot.command("checkemail", async ctx => {
       const headers = full.data.payload?.headers || [];
 
       const from = headers.find(
-        h => h.name.toLowerCase() === "from"
+        h => String(h.name || "").toLowerCase() === "from"
       );
 
-      if (
-        !from ||
-        !from.value.toLowerCase().includes(FAMPAY_SENDER)
-      ) {
+      const senderText = String(from?.value || "").toLowerCase();
+
+      if (!senderText.includes(FAMPAY_SENDER)) {
         unrelated++;
         processedEmails.add(message.id);
         saveData();
@@ -713,7 +741,15 @@ bot.command("checkemail", async ctx => {
 
       if (!payment) {
         unreadable++;
-        // Keep email eligible for retry after parser improvements.
+
+        console.log(
+          "Unreadable FamApp email:",
+          message.id,
+          "Body length:",
+          text.length
+        );
+
+        // Keep it available for retry.
         continue;
       }
 
@@ -733,12 +769,10 @@ bot.command("checkemail", async ctx => {
 
       if (!candidates.length) {
         noPending++;
-        // Do not mark processed: a later request may be checked.
         continue;
       }
 
       let matchedRequest = null;
-      let lastChecks = null;
 
       for (const [requestId, request] of candidates) {
         if (!request.screenshotFileId) continue;
@@ -767,20 +801,15 @@ bot.command("checkemail", async ctx => {
             request,
             screenshot
           };
-          lastChecks = checks;
           break;
         }
-
-        lastChecks = checks;
       }
 
       if (!matchedRequest) {
-        // Do not mark as processed; allow retry.
         mismatches++;
         continue;
       }
 
-      // Re-check all keys immediately before reserving.
       if (
         keys.length === 0 ||
         keys.some(key => usedTransactions.has(key))
